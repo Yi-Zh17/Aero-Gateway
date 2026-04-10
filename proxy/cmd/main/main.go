@@ -21,47 +21,52 @@ const (
 )
 
 func middleware(ctx context.Context, mod api.Module,
-	allocate api.Function, check_header api.Function, free_memory api.Function, proxy *httputil.ReverseProxy) http.HandlerFunc {
+	allocate api.Function, process_request api.Function, free_memory api.Function, proxy *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get header to be injected
 		header_json, err := json.Marshal(r.Header)
 		if err != nil {
-			log.Fatal(err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			log.Printf("JSON marshal error: %v", err)
+			return
 		}
 
-		// Call allocate
+		// Allocate memory
 		ptr, err := allocate.Call(ctx, uint64(len(header_json)))
 		if err != nil {
-			log.Fatal(err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			log.Printf("Wasm allocation error: %v", err)
+			return
 		}
 
-		// Write to memory
-		write := mod.Memory().Write(uint32(ptr[0]), header_json)
-		if !write {
-			log.Fatal("Write failed")
-		}
-
-		// Call check_header
-		res, err := check_header.Call(ctx, ptr[0], uint64(len(header_json)))
-		if err != nil {
-			log.Fatal(err)
-		}
-
+		// Free memory afterwards
 		defer func() {
 			_, err := free_memory.Call(ctx, ptr[0], uint64(len(header_json)), uint64(len(header_json)))
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("Failed to free Wasm memory: %v", err)
 			}
 		}()
 
+		// Write header
+		if ok := mod.Memory().Write(uint32(ptr[0]), header_json); !ok {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		// Check header
+		res, err := process_request.Call(ctx, ptr[0], uint64(len(header_json)))
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			log.Printf("Wasm execution error: %v", err)
+			return
+		}
+
+		// Block if enabled
 		if res[0] == 1 {
 			http.Error(w, "Forbidden", http.StatusForbidden)
-			println("Request blocked")
 			return
-		} else {
-			println("Request passed")
-			proxy.ServeHTTP(w, r)
 		}
+
+		proxy.ServeHTTP(w, r)
 	}
 }
 
@@ -96,9 +101,9 @@ func main() {
 	}
 
 	// Load check header
-	check_header := mod.ExportedFunction("check_header")
-	if check_header == nil {
-		log.Fatal("Function check_header not found")
+	process_request := mod.ExportedFunction("process_request")
+	if process_request == nil {
+		log.Fatal("Function process_request not found")
 	}
 
 	// Load free memory
@@ -117,7 +122,7 @@ func main() {
 	}
 
 	// Create a middleware
-	wrapped_handler := middleware(ctx, mod, allocate, check_header, free_memory, proxy)
+	wrapped_handler := middleware(ctx, mod, allocate, process_request, free_memory, proxy)
 
 	// Listen on port
 	http.ListenAndServe(listen_on_port, wrapped_handler)
