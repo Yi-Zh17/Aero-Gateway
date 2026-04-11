@@ -27,7 +27,7 @@ fn process_request(ptr: *const u8, len: usize) -> u8 {
             let is_suspicious = header.get("Block")
                 .and_then(|values| values.get(0))
                 .and_then(|first_val| first_val.as_str())
-                .map(|s| s == "suspicious")
+                .map(|s| s == "block")
                 .unwrap_or(false);
 
             if is_suspicious { 1 } else { 0 }
