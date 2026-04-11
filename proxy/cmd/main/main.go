@@ -7,6 +7,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 )
@@ -14,6 +15,7 @@ import (
 const (
 	backend_url    = "http://localhost:9090"
 	listen_on_port = ":8080"
+	admin_port     = ":8081"
 	wasm_path      = "../plugin/filter/target/wasm32-unknown-unknown/release/filter.wasm"
 	num_channel    = 32
 )
@@ -78,6 +80,10 @@ func main() {
 		channel <- instance
 	}
 
+	// Wrap channel in a pointer
+	var pool atomic.Pointer[chan Instance]
+	pool.Store(&channel)
+
 	// Instantiate a reverse proxy engine
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -87,8 +93,18 @@ func main() {
 		},
 	}
 
+	// Build metrics
+	metrics := &Metrics{}
+
+	// Set up admin handler
+	adminMux := http.NewServeMux()
+	adminMux.Handle("/admin/upload", withCORS(uploadHandler(ctx, r, &pool)))
+	adminMux.Handle("/admin/metrics", withCORS(metricsHandler(metrics)))
+
+	go http.ListenAndServe(admin_port, adminMux)
+
 	// Create a middleware
-	wrapped_handler := middleware(ctx, channel, proxy)
+	wrapped_handler := middleware(ctx, &pool, metrics, proxy)
 
 	// Listen on port
 	http.ListenAndServe(listen_on_port, wrapped_handler)
